@@ -1,0 +1,14 @@
+{
+  "name": "digitalizador-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor de relay do recurso 'Enviar do Celular' do Digitalizador — repassa fotos do celular para o app no PC sem armazenar nada em disco.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
