@@ -43,43 +43,103 @@ function paginaMobile(sessionId) {
 <title>Digitalizador</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin: 0; min-height: 100vh; background: #E5E5E5; color: #1A1A1A; font-family: -apple-system, "Segoe UI", Inter, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+  html, body { margin: 0; height: 100%; background: #E5E5E5; color: #1A1A1A; font-family: -apple-system, "Segoe UI", Inter, sans-serif; }
+  body { overflow: hidden; }
+
+  /* --- Tela inicial (duas opções) --- */
+  #telaInicial { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
   h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 4px; }
   p { color: #6B7280; font-size: 0.85rem; margin: 0 0 28px; }
   .opcoes { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 340px; }
-  label.btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: #1A1A1A; color: #FFFFFF; padding: 22px; font-size: 0.8rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; border: none; }
-  label.btn.secundario { background: #FFFFFF; color: #1A1A1A; border: 1px solid #1A1A1A; }
-  label.btn svg { width: 28px; height: 28px; }
+  label.btn, button.btn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: #1A1A1A; color: #FFFFFF; padding: 22px; font-size: 0.8rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; border: none; font-family: inherit; }
+  .btn.secundario { background: #FFFFFF; color: #1A1A1A; border: 1px solid #1A1A1A; }
+  .btn svg { width: 28px; height: 28px; }
   input[type=file] { display: none; }
   .status { margin-top: 22px; font-size: 0.8rem; min-height: 1.2em; }
   .status.ok { color: #1A1A1A; font-weight: 600; }
   .status.erro { color: #B33A3A; font-weight: 600; }
   .contador { font-size: 0.7rem; color: #6B7280; margin-top: 4px; }
+
+  /* --- Câmera ao vivo: tira várias fotos em sequência --- */
+  #telaCamera { display: none; position: fixed; inset: 0; background: #000; flex-direction: column; }
+  #video { flex: 1; width: 100%; object-fit: cover; background: #000; min-height: 0; }
+  .camera-topbar { position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: linear-gradient(rgba(0,0,0,0.55), transparent); }
+  .icon-btn { width: 40px; height: 40px; border-radius: 999px; background: rgba(0,0,0,0.45); color: #fff; border: none; display: flex; align-items: center; justify-content: center; }
+  .camera-counter { color: #fff; font-size: 0.75rem; font-weight: 600; background: rgba(0,0,0,0.45); padding: 6px 12px; }
+  .thumbs-strip { display: flex; gap: 8px; overflow-x: auto; padding: 10px 12px; background: #000; }
+  .thumbs-strip img { width: 52px; height: 52px; object-fit: cover; border: 2px solid #D4AF37; flex-shrink: 0; }
+  .camera-controls { display: flex; align-items: center; justify-content: center; gap: 20px; padding: 18px 16px 28px; background: #000; }
+  .shutter-btn { width: 68px; height: 68px; border-radius: 999px; background: #fff; border: 5px solid #1A1A1A; padding: 0; }
+  .btn-concluir { background: #D4AF37; color: #1A1A1A; border: none; padding: 12px 20px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+  .btn-concluir:disabled { opacity: 0.35; }
+  .erro-camera { color: #fff; text-align: center; padding: 24px; font-size: 0.85rem; }
+
+  /* --- Revisão: escolher quais fotos capturadas vão ser enviadas --- */
+  #telaRevisao { display: none; min-height: 100vh; flex-direction: column; padding: 20px; }
+  #telaRevisao h2 { font-size: 1.1rem; margin: 4px 0 2px; }
+  #telaRevisao .sub { color: #6B7280; font-size: 0.78rem; margin: 0 0 16px; }
+  .review-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; overflow-y: auto; flex: 1; }
+  .review-item { position: relative; aspect-ratio: 1; }
+  .review-item img { width: 100%; height: 100%; object-fit: cover; border: 1px solid #1A1A1A; }
+  .review-item.removida img { opacity: 0.25; }
+  .review-item button { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 999px; background: #1A1A1A; color: #fff; border: none; font-size: 0.9rem; line-height: 1; }
+  .review-item.removida button { background: #FFFFFF; color: #1A1A1A; border: 1px solid #1A1A1A; }
+  .review-actions { display: flex; gap: 10px; padding-top: 16px; }
+  .review-actions .btn { flex: 1; padding: 16px; }
 </style>
 </head>
 <body>
-  <h1>Digitalizador</h1>
-  <p>Envie fotos deste celular direto para o computador</p>
-  <div class="opcoes">
-    <label class="btn" for="camera">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-      Tirar Foto
-      <input id="camera" type="file" accept="image/*" capture="environment" multiple />
-    </label>
-    <label class="btn secundario" for="galeria">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="0"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-      Enviar da Galeria
-      <input id="galeria" type="file" accept="image/*" multiple />
-    </label>
+
+  <div id="telaInicial">
+    <h1>Digitalizador</h1>
+    <p>Envie fotos deste celular direto para o computador</p>
+    <div class="opcoes">
+      <button class="btn" id="btnAbrirCamera" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        Tirar Foto
+      </button>
+      <label class="btn secundario" for="galeria">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="0"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        Enviar da Galeria
+        <input id="galeria" type="file" accept="image/*" multiple />
+      </label>
+    </div>
+    <div id="status" class="status"></div>
+    <div id="contador" class="contador"></div>
   </div>
-  <div id="status" class="status"></div>
-  <div id="contador" class="contador"></div>
+
+  <div id="telaCamera">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="captureCanvas" style="display:none;"></canvas>
+    <div class="camera-topbar">
+      <button class="icon-btn" id="btnFecharCamera" type="button" aria-label="Fechar">✕</button>
+      <span class="camera-counter" id="contadorFotos">0 fotos</span>
+    </div>
+    <div id="erroCamera" class="erro-camera" style="display:none;"></div>
+    <div class="thumbs-strip" id="thumbsStrip"></div>
+    <div class="camera-controls">
+      <button class="shutter-btn" id="btnCapturar" type="button" aria-label="Tirar foto"></button>
+      <button class="btn-concluir" id="btnConcluirCaptura" type="button" disabled>Concluir</button>
+    </div>
+  </div>
+
+  <div id="telaRevisao">
+    <h2>Revisar Fotos</h2>
+    <p class="sub">Toque no X pra excluir alguma antes de enviar</p>
+    <div class="review-grid" id="reviewGrid"></div>
+    <div class="review-actions">
+      <button class="btn secundario" id="btnTirarMais" type="button">+ Tirar mais</button>
+      <button class="btn" id="btnEnviarTodas" type="button">Enviar Fotos</button>
+    </div>
+  </div>
+
 <script>
   const SESSION = ${JSON.stringify(sessionId)};
   const statusEl = document.getElementById('status');
   const contadorEl = document.getElementById('contador');
   let totalEnviadas = 0;
 
+  // --- Envio (compartilhado pelas duas origens: câmera e galeria) ---
   function lerComoBase64(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -89,7 +149,7 @@ function paginaMobile(sessionId) {
     });
   }
 
-  async function enviar(files) {
+  async function enviarArquivos(files) {
     if (!files || !files.length) return;
     statusEl.textContent = 'Enviando ' + files.length + ' foto(s)...';
     statusEl.className = 'status';
@@ -114,8 +174,125 @@ function paginaMobile(sessionId) {
     }
   }
 
-  document.getElementById('camera').addEventListener('change', (e) => { enviar(e.target.files); e.target.value = ''; });
-  document.getElementById('galeria').addEventListener('change', (e) => { enviar(e.target.files); e.target.value = ''; });
+  document.getElementById('galeria').addEventListener('change', (e) => {
+    enviarArquivos(Array.from(e.target.files));
+    e.target.value = '';
+  });
+
+  // --- Câmera ao vivo: tira quantas fotos quiser antes de enviar ---
+  const telaInicial = document.getElementById('telaInicial');
+  const telaCamera = document.getElementById('telaCamera');
+  const telaRevisao = document.getElementById('telaRevisao');
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('captureCanvas');
+  const thumbsStrip = document.getElementById('thumbsStrip');
+  const contadorFotos = document.getElementById('contadorFotos');
+  const btnConcluirCaptura = document.getElementById('btnConcluirCaptura');
+  const erroCamera = document.getElementById('erroCamera');
+  const reviewGrid = document.getElementById('reviewGrid');
+
+  let stream = null;
+  let capturadas = []; // { dataUrl, blobUrl }
+
+  async function abrirCamera() {
+    telaInicial.style.display = 'none';
+    telaCamera.style.display = 'flex';
+    erroCamera.style.display = 'none';
+    video.style.display = 'block';
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      });
+      video.srcObject = stream;
+    } catch (e) {
+      video.style.display = 'none';
+      erroCamera.style.display = 'block';
+      erroCamera.textContent = 'Não foi possível acessar a câmera. Verifique a permissão do navegador e tente novamente.';
+    }
+  }
+
+  function pararCamera() {
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  }
+
+  function renderThumbsStrip() {
+    thumbsStrip.innerHTML = '';
+    capturadas.forEach(foto => {
+      const img = document.createElement('img');
+      img.src = foto.dataUrl;
+      thumbsStrip.appendChild(img);
+    });
+    contadorFotos.textContent = capturadas.length + (capturadas.length === 1 ? ' foto' : ' fotos');
+    btnConcluirCaptura.disabled = capturadas.length === 0;
+    thumbsStrip.scrollLeft = thumbsStrip.scrollWidth;
+  }
+
+  document.getElementById('btnCapturar').addEventListener('click', () => {
+    if (!stream || !video.videoWidth) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+    capturadas.push({ dataUrl, id: Date.now() + '-' + capturadas.length });
+    renderThumbsStrip();
+  });
+
+  document.getElementById('btnFecharCamera').addEventListener('click', () => {
+    pararCamera();
+    if (capturadas.length > 0) { mostrarRevisao(); }
+    else { telaCamera.style.display = 'none'; telaInicial.style.display = 'flex'; }
+  });
+
+  document.getElementById('btnAbrirCamera').addEventListener('click', abrirCamera);
+
+  btnConcluirCaptura.addEventListener('click', () => {
+    pararCamera();
+    mostrarRevisao();
+  });
+
+  function mostrarRevisao() {
+    telaCamera.style.display = 'none';
+    telaRevisao.style.display = 'flex';
+    renderReviewGrid();
+  }
+
+  function renderReviewGrid() {
+    reviewGrid.innerHTML = '';
+    capturadas.forEach(foto => {
+      const item = document.createElement('div');
+      item.className = 'review-item' + (foto.removida ? ' removida' : '');
+      const img = document.createElement('img');
+      img.src = foto.dataUrl;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = foto.removida ? '↺' : '✕';
+      btn.addEventListener('click', () => { foto.removida = !foto.removida; renderReviewGrid(); });
+      item.appendChild(img); item.appendChild(btn);
+      reviewGrid.appendChild(item);
+    });
+  }
+
+  document.getElementById('btnTirarMais').addEventListener('click', () => {
+    telaRevisao.style.display = 'none';
+    abrirCamera();
+    renderThumbsStrip();
+  });
+
+  document.getElementById('btnEnviarTodas').addEventListener('click', async () => {
+    const restantes = capturadas.filter(f => !f.removida);
+    if (!restantes.length) return;
+    const files = restantes.map((foto, i) => {
+      const bin = atob(foto.dataUrl.split(',')[1]);
+      const bytes = new Uint8Array(bin.length);
+      for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+      return new File([bytes], 'foto-camera-' + Date.now() + '-' + i + '.jpg', { type: 'image/jpeg' });
+    });
+    telaRevisao.style.display = 'none';
+    telaInicial.style.display = 'flex';
+    capturadas = [];
+    await enviarArquivos(files);
+  });
 </script>
 </body>
 </html>`;
