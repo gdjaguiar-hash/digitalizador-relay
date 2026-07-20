@@ -156,11 +156,16 @@ function paginaMobile(sessionId) {
   .btn-concluir:disabled { opacity: 0.35; }
   .erro-camera { color: #fff; text-align: center; padding: 24px; font-size: 0.85rem; }
 
-  /* --- Revisão: escolher quais fotos capturadas vão ser enviadas --- */
-  #telaRevisao { display: none; min-height: 100vh; flex-direction: column; padding: 20px; }
+    /* --- Revisão: escolher quais fotos capturadas vão ser enviadas ---
+     position:fixed + inset:0 (em vez de min-height:100vh) porque no mobile
+     100vh costuma incluir a área da barra de endereço do navegador; com
+     overflow:hidden no body, isso empurrava o botão "Enviar Fotos" pra fora
+     da área visível, só alcançável dando zoom-out. Fixed com inset:0 sempre
+     bate certinho com a área visível de verdade, e só a grade rola por dentro. */
+  #telaRevisao { display: none; position: fixed; inset: 0; flex-direction: column; padding: 20px; background: #E5E5E5; }
   #telaRevisao h2 { font-size: 1.1rem; margin: 4px 0 2px; }
   #telaRevisao .sub { color: #6B7280; font-size: 0.78rem; margin: 0 0 16px; }
-  .review-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; overflow-y: auto; flex: 1; }
+  .review-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
   .review-item { position: relative; aspect-ratio: 1; }
   .review-item img { width: 100%; height: 100%; object-fit: cover; border: 1px solid #1A1A1A; }
   .review-item.removida img { opacity: 0.25; }
