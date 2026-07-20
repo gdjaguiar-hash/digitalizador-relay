@@ -17,12 +17,19 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
 const SESSION_MAX_AGE_MS = 10 * 60 * 1000; // limite absoluto de vida da sessão
 const SWEEP_INTERVAL_MS = 30 * 1000;
 
-// Pasta onde as versões publicadas do app ficam: suba manualmente aqui o
-// latest.yml + o instalador (.exe) gerados por `npm run dist:installer` no
-// temp-app a cada release. O electron-updater lê essa pasta via provider
-// "generic" (ver temp-app/package.json -> build.publish).
+// Pasta onde as versões publicadas do app ficam: o instalador (.exe) + o
+// latest.yml gerados por `npm run dist:installer` no temp-app a cada release,
+// publicados via a página /admin (ou manualmente). O electron-updater lê essa
+// pasta via provider "generic" (ver temp-app/package.json -> build.publish).
 const UPDATES_DIR = path.join(__dirname, 'updates');
 const UPDATE_CONTENT_TYPES = { '.yml': 'text/yaml; charset=utf-8', '.exe': 'application/octet-stream', '.blockmap': 'application/octet-stream' };
+const UPDATE_FILENAME_RE = /^[A-Za-z0-9._-]+\.(exe|yml|blockmap)$/;
+
+// Página /admin: publica novas versões sem precisar mexer no GitHub. Protegida
+// por um token simples (defina ADMIN_TOKEN nas env vars do Render — sem essa
+// variável configurada, o upload fica bloqueado por padrão).
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const ADMIN_MAX_BODY_BYTES = 250 * 1024 * 1024; // instalador + blockmap + yml
 // sessionId -> { createdAt, lastTouch, phoneLastActivity, queue: [] }
 const sessions = new Map();
 
@@ -67,7 +74,6 @@ function paginaMobile(sessionId) {
   .status.ok { color: #1A1A1A; font-weight: 600; }
   .status.erro { color: #B33A3A; font-weight: 600; }
   .contador { font-size: 0.7rem; color: #6B7280; margin-top: 4px; }
-
   /* --- Câmera ao vivo: tira várias fotos em sequência --- */
   #telaCamera { display: none; position: fixed; inset: 0; background: #000; flex-direction: column; }
   #video { flex: 1; width: 100%; object-fit: cover; background: #000; min-height: 0; }
@@ -348,12 +354,111 @@ function paginaExpirada() {
 <style>body{margin:0;min-height:100vh;background:#E5E5E5;color:#1A1A1A;font-family:-apple-system,"Segoe UI",Inter,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;}</style>
 </head><body><div><h1 style="font-size:1.2rem;">Link expirado</h1><p style="color:#6B7280;font-size:0.85rem;">Gere um novo QR Code no computador e escaneie novamente.</p></div></body></html>`;
 }
+function paginaAdmin() {
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Digitalizador — Publicar versão</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: #E5E5E5; color: #1A1A1A; font-family: -apple-system, "Segoe UI", Inter, sans-serif; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .card { background: #fff; border: 1px solid #1A1A1A; padding: 32px; width: 100%; max-width: 420px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p { color: #6B7280; font-size: 0.82rem; margin: 0 0 24px; }
+  label { display: block; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin: 16px 0 6px; }
+  input[type=password], input[type=file] { width: 100%; padding: 10px; border: 1px solid #1A1A1A; font-size: 0.85rem; background: #fff; }
+  button { margin-top: 24px; width: 100%; padding: 12px; background: #1A1A1A; color: #fff; border: none; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; }
+  button:disabled { opacity: 0.5; }
+  .status { margin-top: 16px; font-size: 0.82rem; min-height: 1.2em; }
+  .status.ok { color: #1A7A3A; font-weight: 600; }
+  .status.erro { color: #B33A3A; font-weight: 600; }
+  .hint { font-size: 0.72rem; color: #6B7280; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Publicar nova versão</h1>
+    <p>Envie o instalador (.exe) e o latest.yml gerados por "npm run dist:installer".</p>
+    <form id="f">
+      <label for="token">Senha de administrador</label>
+      <input type="password" id="token" autocomplete="current-password" required />
+
+      <label for="files">Arquivos (.exe, .yml, .blockmap)</label>
+      <input type="file" id="files" multiple accept=".exe,.yml,.blockmap" required />
+      <div class="hint">Selecione o Digitalizador-Setup-X.Y.Z.exe, o latest.yml e (se existir) o .blockmap juntos.</div>
+
+      <button type="submit" id="btn">Publicar</button>
+      <div id="status" class="status"></div>
+    </form>
+  </div>
+<script>
+  const form = document.getElementById('f');
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('btn');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const files = document.getElementById('files').files;
+    if (!files.length) return;
+    const fd = new FormData();
+    for (const file of files) fd.append('files', file, file.name);
+    btn.disabled = true;
+    statusEl.textContent = 'Enviando ' + files.length + ' arquivo(s)...';
+    statusEl.className = 'status';
+    try {
+      const res = await fetch('/admin/upload', {
+        method: 'POST',
+        headers: { 'X-Admin-Token': document.getElementById('token').value },
+        body: fd
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.erro || 'falhou');
+      statusEl.textContent = 'Publicado! ' + data.arquivos.join(', ');
+      statusEl.className = 'status ok';
+    } catch (err) {
+      statusEl.textContent = 'Erro: ' + err.message;
+      statusEl.className = 'status erro';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>`;
+}
 function jsonResponse(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
 }
 
+// Parser de multipart/form-data simples e sem dependências — suficiente pra
+// receber os poucos arquivos (.exe/.yml/.blockmap) da página /admin. Assume
+// partes bem formadas (é sempre o browser, via FormData, gerando o corpo).
+function parseMultipart(buffer, boundary) {
+  const boundaryBuf = Buffer.from('--' + boundary);
+  const parts = [];
+  let start = buffer.indexOf(boundaryBuf);
+  while (start !== -1) {
+    const next = buffer.indexOf(boundaryBuf, start + boundaryBuf.length);
+    if (next === -1) break;
+    let partBuf = buffer.slice(start + boundaryBuf.length, next);
+    if (partBuf.slice(0, 2).toString('latin1') === '\r\n') partBuf = partBuf.slice(2);
+    if (partBuf.slice(-2).toString('latin1') === '\r\n') partBuf = partBuf.slice(0, -2);
+    const headerEnd = partBuf.indexOf('\r\n\r\n');
+    if (headerEnd !== -1) {
+      const headerStr = partBuf.slice(0, headerEnd).toString('utf8');
+      const data = partBuf.slice(headerEnd + 4);
+      const dispositionMatch = headerStr.match(/name="([^"]*)"(?:; filename="([^"]*)")?/i);
+      if (dispositionMatch) {
+        parts.push({ name: dispositionMatch[1], filename: dispositionMatch[2] || null, data });
+      }
+    }
+    start = next;
+  }
+  return parts;
+}
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split('/').filter(Boolean); // ex.: ['s', 'ID'] ou ['api','upload','ID']
@@ -370,6 +475,51 @@ const server = http.createServer((req, res) => {
       const type = UPDATE_CONTENT_TYPES[path.extname(nome).toLowerCase()] || 'application/octet-stream';
       res.writeHead(200, { 'Content-Type': type, 'Content-Length': stat.size });
       fs.createReadStream(filePath).pipe(res);
+    });
+    return;
+  }
+  // GET /admin -> formulário de publicação de novas versões
+  if (req.method === 'GET' && parts[0] === 'admin' && parts.length === 1) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(paginaAdmin());
+    return;
+  }
+
+  // POST /admin/upload -> recebe o instalador + latest.yml (multipart/form-data)
+  if (req.method === 'POST' && parts[0] === 'admin' && parts[1] === 'upload' && parts.length === 2) {
+    if (!ADMIN_TOKEN || req.headers['x-admin-token'] !== ADMIN_TOKEN) {
+      jsonResponse(res, 401, { erro: 'não autorizado' });
+      return;
+    }
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+    if (!boundaryMatch) { jsonResponse(res, 400, { erro: 'content-type inválido' }); return; }
+    const boundary = boundaryMatch[1] || boundaryMatch[2];
+    let size = 0; const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > ADMIN_MAX_BODY_BYTES) { req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        if (!fs.existsSync(UPDATES_DIR)) fs.mkdirSync(UPDATES_DIR, { recursive: true });
+        const partes = parseMultipart(Buffer.concat(chunks), boundary);
+        const salvos = [];
+        for (const p of partes) {
+          if (!p.filename) continue;
+          if (!UPDATE_FILENAME_RE.test(p.filename)) {
+            jsonResponse(res, 400, { erro: `nome de arquivo não permitido: ${p.filename}` });
+            return;
+          }
+          fs.writeFileSync(path.join(UPDATES_DIR, p.filename), p.data);
+          salvos.push(p.filename);
+        }
+        if (!salvos.length) { jsonResponse(res, 400, { erro: 'nenhum arquivo recebido' }); return; }
+        jsonResponse(res, 200, { ok: true, arquivos: salvos });
+      } catch (e) {
+        jsonResponse(res, 500, { erro: 'falha ao salvar arquivos' });
+      }
     });
     return;
   }
