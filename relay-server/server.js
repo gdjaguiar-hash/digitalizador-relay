@@ -8,6 +8,8 @@
 // reiniciar, tudo se perde, o que é esperado e aceitável aqui.
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const MAX_BODY_BYTES = 40 * 1024 * 1024; // ~40MB por lote de fotos
@@ -15,6 +17,12 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
 const SESSION_MAX_AGE_MS = 10 * 60 * 1000; // limite absoluto de vida da sessão
 const SWEEP_INTERVAL_MS = 30 * 1000;
 
+// Pasta onde as versões publicadas do app ficam: suba manualmente aqui o
+// latest.yml + o instalador (.exe) gerados por `npm run dist:installer` no
+// temp-app a cada release. O electron-updater lê essa pasta via provider
+// "generic" (ver temp-app/package.json -> build.publish).
+const UPDATES_DIR = path.join(__dirname, 'updates');
+const UPDATE_CONTENT_TYPES = { '.yml': 'text/yaml; charset=utf-8', '.exe': 'application/octet-stream', '.blockmap': 'application/octet-stream' };
 // sessionId -> { createdAt, lastTouch, phoneLastActivity, queue: [] }
 const sessions = new Map();
 
@@ -89,6 +97,7 @@ function paginaMobile(sessionId) {
 </style>
 </head>
 <body>
+<body>
 
   <div id="telaInicial">
     <h1>Digitalizador</h1>
@@ -107,7 +116,6 @@ function paginaMobile(sessionId) {
     <div id="status" class="status"></div>
     <div id="contador" class="contador"></div>
   </div>
-
   <div id="telaCamera">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="captureCanvas" style="display:none;"></canvas>
@@ -132,7 +140,6 @@ function paginaMobile(sessionId) {
       <button class="btn" id="btnEnviarTodas" type="button">Enviar Fotos</button>
     </div>
   </div>
-
 <script>
   const SESSION = ${JSON.stringify(sessionId)};
   const statusEl = document.getElementById('status');
@@ -178,7 +185,6 @@ function paginaMobile(sessionId) {
     enviarArquivos(Array.from(e.target.files));
     e.target.value = '';
   });
-
   // --- Câmera ao vivo: tira quantas fotos quiser antes de enviar ---
   const telaInicial = document.getElementById('telaInicial');
   const telaCamera = document.getElementById('telaCamera');
@@ -192,6 +198,7 @@ function paginaMobile(sessionId) {
   const reviewGrid = document.getElementById('reviewGrid');
 
   let stream = null;
+  let imageCapture = null;
   let capturadas = []; // { dataUrl, blobUrl }
 
   async function abrirCamera() {
@@ -201,10 +208,26 @@ function paginaMobile(sessionId) {
     video.style.display = 'block';
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 4096 },
+          height: { ideal: 2160 }
+        },
         audio: false
       });
       video.srcObject = stream;
+
+      const track = stream.getVideoTracks()[0];
+      try {
+        const caps = track.getCapabilities ? track.getCapabilities() : null;
+        if (caps && caps.focusMode && caps.focusMode.includes('continuous')) {
+          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+        }
+      } catch (e) {
+        // foco manual/capacidades indisponíveis (comum no iOS) — segue com o padrão do navegador
+      }
+
+      imageCapture = ('ImageCapture' in window) ? new ImageCapture(track) : null;
     } catch (e) {
       video.style.display = 'none';
       erroCamera.style.display = 'block';
@@ -215,7 +238,6 @@ function paginaMobile(sessionId) {
   function pararCamera() {
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   }
-
   function renderThumbsStrip() {
     thumbsStrip.innerHTML = '';
     capturadas.forEach(foto => {
@@ -228,16 +250,40 @@ function paginaMobile(sessionId) {
     thumbsStrip.scrollLeft = thumbsStrip.scrollWidth;
   }
 
-  document.getElementById('btnCapturar').addEventListener('click', () => {
-    if (!stream || !video.videoWidth) return;
+  function capturarViaCanvas() {
+    if (!video.videoWidth) return null;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+    return canvas.toDataURL('image/jpeg', 0.95);
+  }
+
+  function blobParaDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  document.getElementById('btnCapturar').addEventListener('click', async () => {
+    if (!stream) return;
+    let dataUrl = null;
+    if (imageCapture) {
+      try {
+        const blob = await imageCapture.takePhoto();
+        dataUrl = await blobParaDataUrl(blob);
+      } catch (e) {
+        dataUrl = capturarViaCanvas();
+      }
+    } else {
+      dataUrl = capturarViaCanvas();
+    }
+    if (!dataUrl) return;
     capturadas.push({ dataUrl, id: Date.now() + '-' + capturadas.length });
     renderThumbsStrip();
   });
-
   document.getElementById('btnFecharCamera').addEventListener('click', () => {
     pararCamera();
     if (capturadas.length > 0) { mostrarRevisao(); }
@@ -272,7 +318,6 @@ function paginaMobile(sessionId) {
       reviewGrid.appendChild(item);
     });
   }
-
   document.getElementById('btnTirarMais').addEventListener('click', () => {
     telaRevisao.style.display = 'none';
     abrirCamera();
@@ -304,7 +349,6 @@ function paginaExpirada() {
 <style>body{margin:0;min-height:100vh;background:#E5E5E5;color:#1A1A1A;font-family:-apple-system,"Segoe UI",Inter,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;}</style>
 </head><body><div><h1 style="font-size:1.2rem;">Link expirado</h1><p style="color:#6B7280;font-size:0.85rem;">Gere um novo QR Code no computador e escaneie novamente.</p></div></body></html>`;
 }
-
 function jsonResponse(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
@@ -315,6 +359,21 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split('/').filter(Boolean); // ex.: ['s', 'ID'] ou ['api','upload','ID']
 
+  // GET /updates/:arquivo -> serve latest.yml e os instaladores publicados
+  // (auto-update do app desktop via electron-updater, provider "generic")
+  if (req.method === 'GET' && parts[0] === 'updates' && parts.length === 2) {
+    const nome = parts[1];
+    if (!/^[A-Za-z0-9._-]+$/.test(nome)) { res.writeHead(400); res.end('nome inválido'); return; }
+    const filePath = path.join(UPDATES_DIR, nome);
+    if (!filePath.startsWith(UPDATES_DIR)) { res.writeHead(400); res.end('nome inválido'); return; }
+    fs.stat(filePath, (err, stat) => {
+      if (err || !stat.isFile()) { res.writeHead(404); res.end('não encontrado'); return; }
+      const type = UPDATE_CONTENT_TYPES[path.extname(nome).toLowerCase()] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': stat.size });
+      fs.createReadStream(filePath).pipe(res);
+    });
+    return;
+  }
   // GET /s/:id -> página mobile
   if (req.method === 'GET' && parts[0] === 's' && parts.length === 2) {
     const id = parts[1];
@@ -352,7 +411,6 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-
   // GET /api/poll/:id -> PC busca fotos pendentes (e esvazia a fila)
   if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'poll' && parts.length === 3) {
     const id = parts[2];
