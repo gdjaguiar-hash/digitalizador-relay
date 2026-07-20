@@ -24,12 +24,81 @@ const SWEEP_INTERVAL_MS = 30 * 1000;
 const UPDATES_DIR = path.join(__dirname, 'updates');
 const UPDATE_CONTENT_TYPES = { '.yml': 'text/yaml; charset=utf-8', '.exe': 'application/octet-stream', '.blockmap': 'application/octet-stream' };
 const UPDATE_FILENAME_RE = /^[A-Za-z0-9._-]+\.(exe|yml|blockmap)$/;
-
-// Página /admin: publica novas versões sem precisar mexer no GitHub. Protegida
-// por um token simples (defina ADMIN_TOKEN nas env vars do Render — sem essa
-// variável configurada, o upload fica bloqueado por padrão).
+// Painel /admin: login com sessão (cookie) + lista de apps + publicação de
+// novas versões. A senha vem de ADMIN_TOKEN nas env vars do Render — sem essa
+// variável configurada, o login fica bloqueado por padrão. Sessões ficam em
+// memória (Map), como as sessões de QR — some tudo se o processo reiniciar.
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const ADMIN_MAX_BODY_BYTES = 250 * 1024 * 1024; // instalador + blockmap + yml
+const ADMIN_SESSION_COOKIE = 'digitalizador_admin_session';
+const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// sessionId -> expiresAt (ms)
+const adminSessions = new Map();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, expiresAt] of adminSessions) {
+    if (now > expiresAt) adminSessions.delete(id);
+  }
+}, SWEEP_INTERVAL_MS);
+
+// Apps disponíveis pra publicar no painel. Adicione outro item aqui quando
+// tiver um segundo app — cada um ganha sua própria tela de publicação.
+const APPS = [
+  { id: 'digitalizador', name: 'Digitalizador', description: 'Digitalizador de documentos para desktop (Electron + Windows).' }
+];
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const out = {};
+  header.split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    const k = pair.slice(0, idx).trim();
+    const v = pair.slice(idx + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  });
+  return out;
+}
+function isAuthenticated(req) {
+  const sid = parseCookies(req)[ADMIN_SESSION_COOKIE];
+  if (!sid) return false;
+  const expiresAt = adminSessions.get(sid);
+  if (!expiresAt || Date.now() > expiresAt) { adminSessions.delete(sid); return false; }
+  return true;
+}
+
+function createAdminSession() {
+  const id = crypto.randomBytes(24).toString('hex');
+  adminSessions.set(id, Date.now() + ADMIN_SESSION_MAX_AGE_MS);
+  return id;
+}
+
+function passwordMatches(candidate) {
+  if (!ADMIN_TOKEN || typeof candidate !== 'string') return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(ADMIN_TOKEN);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function readJsonBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) { req.destroy(); reject(new Error('corpo grande demais')); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+      catch (e) { reject(new Error('corpo inválido')); }
+    });
+    req.on('error', reject);
+  });
+}
+
 // sessionId -> { createdAt, lastTouch, phoneLastActivity, queue: [] }
 const sessions = new Map();
 
@@ -48,7 +117,6 @@ setInterval(() => {
     if (now - s.lastTouch > SESSION_MAX_AGE_MS) sessions.delete(id);
   }
 }, SWEEP_INTERVAL_MS);
-
 function paginaMobile(sessionId) {
   return `<!doctype html>
 <html lang="pt-BR">
@@ -354,40 +422,148 @@ function paginaExpirada() {
 <style>body{margin:0;min-height:100vh;background:#E5E5E5;color:#1A1A1A;font-family:-apple-system,"Segoe UI",Inter,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;}</style>
 </head><body><div><h1 style="font-size:1.2rem;">Link expirado</h1><p style="color:#6B7280;font-size:0.85rem;">Gere um novo QR Code no computador e escaneie novamente.</p></div></body></html>`;
 }
-function paginaAdmin() {
+const ADMIN_ESTILO_BASE = `
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: #E5E5E5; color: #1A1A1A; font-family: -apple-system, "Segoe UI", Inter, sans-serif; }
+  a { color: inherit; }
+  .status { margin-top: 16px; font-size: 0.82rem; min-height: 1.2em; }
+  .status.ok { color: #1A7A3A; font-weight: 600; }
+  .status.erro { color: #B33A3A; font-weight: 600; }
+`;
+
+function paginaLogin(erro) {
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Digitalizador — Publicar versão</title>
+<title>Digitalizador — Painel</title>
 <style>
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; background: #E5E5E5; color: #1A1A1A; font-family: -apple-system, "Segoe UI", Inter, sans-serif; display: flex; align-items: center; justify-content: center; padding: 24px; }
-  .card { background: #fff; border: 1px solid #1A1A1A; padding: 32px; width: 100%; max-width: 420px; }
+${ADMIN_ESTILO_BASE}
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .card { background: #fff; border: 1px solid #1A1A1A; padding: 32px; width: 100%; max-width: 380px; }
   h1 { font-size: 1.2rem; margin: 0 0 4px; }
   p { color: #6B7280; font-size: 0.82rem; margin: 0 0 24px; }
   label { display: block; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin: 16px 0 6px; }
-  input[type=password], input[type=file] { width: 100%; padding: 10px; border: 1px solid #1A1A1A; font-size: 0.85rem; background: #fff; }
+  input[type=password] { width: 100%; padding: 10px; border: 1px solid #1A1A1A; font-size: 0.85rem; background: #fff; }
   button { margin-top: 24px; width: 100%; padding: 12px; background: #1A1A1A; color: #fff; border: none; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; }
   button:disabled { opacity: 0.5; }
-  .status { margin-top: 16px; font-size: 0.82rem; min-height: 1.2em; }
-  .status.ok { color: #1A7A3A; font-weight: 600; }
-  .status.erro { color: #B33A3A; font-weight: 600; }
-  .hint { font-size: 0.72rem; color: #6B7280; margin-top: 6px; }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1>Publicar nova versão</h1>
+    <h1>Painel Digitalizador</h1>
+    <p>Entre com a senha de administrador.</p>
+    <form id="f">
+      <label for="senha">Senha</label>
+      <input type="password" id="senha" autocomplete="current-password" autofocus required />
+      <button type="submit" id="btn">Entrar</button>
+      <div id="status" class="status">${erro ? `<span class="erro">${erro}</span>` : ''}</div>
+    </form>
+  </div>
+<script>
+  const form = document.getElementById('f');
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('btn');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    statusEl.textContent = 'Entrando...';
+    statusEl.className = 'status';
+    try {
+      const res = await fetch('/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ senha: document.getElementById('senha').value })
+      });
+      if (!res.ok) throw new Error('Senha incorreta.');
+      window.location.href = '/admin';
+    } catch (err) {
+      statusEl.textContent = err.message;
+      statusEl.className = 'status erro';
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>`;
+}
+function paginaDashboard() {
+  const cards = APPS.map((app) => `
+    <a class="app-card" href="/admin/apps/${app.id}">
+      <h2>${app.name}</h2>
+      <p>${app.description}</p>
+    </a>`).join('');
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Digitalizador — Painel</title>
+<style>
+${ADMIN_ESTILO_BASE}
+  body { padding: 24px; }
+  header { display: flex; justify-content: space-between; align-items: center; max-width: 720px; margin: 0 auto 24px; }
+  h1 { font-size: 1.2rem; margin: 0; }
+  button.sair { background: none; border: 1px solid #1A1A1A; padding: 8px 14px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer; }
+  .apps { max-width: 720px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+  .app-card { display: block; background: #fff; border: 1px solid #1A1A1A; padding: 20px; text-decoration: none; }
+  .app-card h2 { font-size: 1rem; margin: 0 0 6px; }
+  .app-card p { color: #6B7280; font-size: 0.78rem; margin: 0; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Painel Digitalizador</h1>
+    <button class="sair" id="sair">Sair</button>
+  </header>
+  <div class="apps">${cards}</div>
+<script>
+  document.getElementById('sair').addEventListener('click', async () => {
+    await fetch('/admin/logout', { method: 'POST' });
+    window.location.href = '/admin';
+  });
+</script>
+</body>
+</html>`;
+}
+function paginaPublicarApp(app) {
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${app.name} — Publicar versão</title>
+<style>
+${ADMIN_ESTILO_BASE}
+  body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .card { background: #fff; border: 1px solid #1A1A1A; padding: 32px; width: 100%; max-width: 440px; }
+  .voltar { display: inline-block; font-size: 0.75rem; text-decoration: none; color: #6B7280; margin-bottom: 16px; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p { color: #6B7280; font-size: 0.82rem; margin: 0 0 24px; }
+  label { display: block; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin: 16px 0 6px; }
+  input[type=file] { width: 100%; padding: 10px; border: 1px solid #1A1A1A; font-size: 0.85rem; background: #fff; }
+  button { margin-top: 24px; width: 100%; padding: 12px; background: #1A1A1A; color: #fff; border: none; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer; }
+  button:disabled { opacity: 0.5; }
+  .hint { font-size: 0.72rem; color: #6B7280; margin-top: 6px; }
+  .barra-fundo { margin-top: 16px; height: 8px; background: #E5E5E5; border: 1px solid #1A1A1A; display: none; }
+  .barra-fundo.ativa { display: block; }
+  .barra-progresso { height: 100%; width: 0%; background: #1A1A1A; transition: width 0.1s linear; }
+  .porcentagem { font-size: 0.75rem; color: #6B7280; margin-top: 4px; text-align: right; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <a class="voltar" href="/admin">&larr; Painel</a>
+    <h1>${app.name}</h1>
     <p>Envie o instalador (.exe) e o latest.yml gerados por "npm run dist:installer".</p>
     <form id="f">
-      <label for="token">Senha de administrador</label>
-      <input type="password" id="token" autocomplete="current-password" required />
-
       <label for="files">Arquivos (.exe, .yml, .blockmap)</label>
       <input type="file" id="files" multiple accept=".exe,.yml,.blockmap" required />
       <div class="hint">Selecione o Digitalizador-Setup-X.Y.Z.exe, o latest.yml e (se existir) o .blockmap juntos.</div>
+
+      <div class="barra-fundo" id="barraFundo"><div class="barra-progresso" id="barraProgresso"></div></div>
+      <div class="porcentagem" id="porcentagem"></div>
 
       <button type="submit" id="btn">Publicar</button>
       <div id="status" class="status"></div>
@@ -397,31 +573,51 @@ function paginaAdmin() {
   const form = document.getElementById('f');
   const statusEl = document.getElementById('status');
   const btn = document.getElementById('btn');
-  form.addEventListener('submit', async (e) => {
+  const barraFundo = document.getElementById('barraFundo');
+  const barraProgresso = document.getElementById('barraProgresso');
+  const porcentagemEl = document.getElementById('porcentagem');
+
+  form.addEventListener('submit', (e) => {
     e.preventDefault();
     const files = document.getElementById('files').files;
     if (!files.length) return;
     const fd = new FormData();
     for (const file of files) fd.append('files', file, file.name);
+
     btn.disabled = true;
-    statusEl.textContent = 'Enviando ' + files.length + ' arquivo(s)...';
+    statusEl.textContent = '';
     statusEl.className = 'status';
-    try {
-      const res = await fetch('/admin/upload', {
-        method: 'POST',
-        headers: { 'X-Admin-Token': document.getElementById('token').value },
-        body: fd
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.erro || 'falhou');
-      statusEl.textContent = 'Publicado! ' + data.arquivos.join(', ');
-      statusEl.className = 'status ok';
-    } catch (err) {
-      statusEl.textContent = 'Erro: ' + err.message;
-      statusEl.className = 'status erro';
-    } finally {
+    barraFundo.classList.add('ativa');
+    barraProgresso.style.width = '0%';
+    porcentagemEl.textContent = '0%';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/admin/upload/${app.id}');
+    xhr.upload.addEventListener('progress', (ev) => {
+      if (!ev.lengthComputable) return;
+      const pct = Math.round((ev.loaded / ev.total) * 100);
+      barraProgresso.style.width = pct + '%';
+      porcentagemEl.textContent = pct + '%';
+    });
+    xhr.onload = () => {
       btn.disabled = false;
-    }
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        statusEl.textContent = 'Publicado! ' + (data.arquivos || []).join(', ');
+        statusEl.className = 'status ok';
+        porcentagemEl.textContent = '100%';
+      } else {
+        statusEl.textContent = 'Erro: ' + (data.erro || 'falhou');
+        statusEl.className = 'status erro';
+      }
+    };
+    xhr.onerror = () => {
+      btn.disabled = false;
+      statusEl.textContent = 'Erro de conexão.';
+      statusEl.className = 'status erro';
+    };
+    xhr.send(fd);
   });
 </script>
 </body>
@@ -478,19 +674,46 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // GET /admin -> formulário de publicação de novas versões
+  // GET /admin -> painel (login se não autenticado, dashboard se autenticado)
   if (req.method === 'GET' && parts[0] === 'admin' && parts.length === 1) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(paginaAdmin());
+    res.end(isAuthenticated(req) ? paginaDashboard() : paginaLogin());
     return;
   }
 
-  // POST /admin/upload -> recebe o instalador + latest.yml (multipart/form-data)
-  if (req.method === 'POST' && parts[0] === 'admin' && parts[1] === 'upload' && parts.length === 2) {
-    if (!ADMIN_TOKEN || req.headers['x-admin-token'] !== ADMIN_TOKEN) {
-      jsonResponse(res, 401, { erro: 'não autorizado' });
-      return;
-    }
+  // POST /admin/login -> confere a senha e abre sessão (cookie httpOnly)
+  if (req.method === 'POST' && parts[0] === 'admin' && parts[1] === 'login' && parts.length === 2) {
+    readJsonBody(req, 10 * 1024).then((body) => {
+      if (!passwordMatches(body.senha)) { jsonResponse(res, 401, { erro: 'senha incorreta' }); return; }
+      const sessionId = createAdminSession();
+      res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=${sessionId}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${Math.floor(ADMIN_SESSION_MAX_AGE_MS / 1000)}`);
+      jsonResponse(res, 200, { ok: true });
+    }).catch(() => jsonResponse(res, 400, { erro: 'corpo inválido' }));
+    return;
+  }
+
+  // POST /admin/logout -> encerra a sessão
+  if (req.method === 'POST' && parts[0] === 'admin' && parts[1] === 'logout' && parts.length === 2) {
+    const sid = parseCookies(req)[ADMIN_SESSION_COOKIE];
+    if (sid) adminSessions.delete(sid);
+    res.setHeader('Set-Cookie', `${ADMIN_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`);
+    jsonResponse(res, 200, { ok: true });
+    return;
+  }
+  // GET /admin/apps/:id -> tela de publicação de um app específico
+  if (req.method === 'GET' && parts[0] === 'admin' && parts[1] === 'apps' && parts.length === 3) {
+    if (!isAuthenticated(req)) { res.writeHead(302, { Location: '/admin' }); res.end(); return; }
+    const app = APPS.find((a) => a.id === parts[2]);
+    if (!app) { res.writeHead(404); res.end('app não encontrado'); return; }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(paginaPublicarApp(app));
+    return;
+  }
+
+  // POST /admin/upload/:appId -> recebe o instalador + latest.yml (multipart/form-data)
+  if (req.method === 'POST' && parts[0] === 'admin' && parts[1] === 'upload' && parts.length === 3) {
+    if (!isAuthenticated(req)) { jsonResponse(res, 401, { erro: 'não autorizado — faça login novamente' }); return; }
+    if (!APPS.some((a) => a.id === parts[2])) { jsonResponse(res, 404, { erro: 'app não encontrado' }); return; }
     const contentType = req.headers['content-type'] || '';
     const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
     if (!boundaryMatch) { jsonResponse(res, 400, { erro: 'content-type inválido' }); return; }
