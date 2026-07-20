@@ -99,22 +99,38 @@ function readJsonBody(req, maxBytes) {
   });
 }
 
-// sessionId -> { createdAt, lastTouch, phoneLastActivity, queue: [] }
+// sessionId -> { createdAt, lastTouch, phoneLastActivity, queue, closed, usedAt }
 const sessions = new Map();
 
+// Depois que o celular manda fotos com sucesso, a sessão fica "fechada": o
+// link não abre mais (mostra "expirado" se recarregar ou escanear de novo),
+// mas o PC ainda tem uma janela curta pra buscar (poll) o último lote antes
+// da sessão ser apagada de vez.
+const SESSION_CLOSE_GRACE_MS = 60 * 1000;
 function getOrCreateSession(id) {
   let s = sessions.get(id);
   if (!s) {
-    s = { createdAt: Date.now(), lastTouch: Date.now(), phoneLastActivity: null, queue: [] };
+    s = { createdAt: Date.now(), lastTouch: Date.now(), phoneLastActivity: null, queue: [], closed: false, usedAt: null };
     sessions.set(id, s);
   }
   return s;
 }
 
+// Sessão "expirada" pra fins de abrir o link/mandar fotos: passou do tempo
+// máximo de vida (independente de uso) OU já foi usada pra enviar fotos
+// (link de uso único — fecha assim que o primeiro envio é concluído).
+function sessionExpirada(s) {
+  if (!s) return true;
+  if (s.closed) return true;
+  return Date.now() - s.createdAt > SESSION_MAX_AGE_MS;
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [id, s] of sessions) {
-    if (now - s.lastTouch > SESSION_MAX_AGE_MS) sessions.delete(id);
+    const expirouPorIdade = now - s.createdAt > SESSION_MAX_AGE_MS;
+    const expirouPosFechamento = s.closed && s.usedAt && (now - s.usedAt > SESSION_CLOSE_GRACE_MS);
+    if (expirouPorIdade || expirouPosFechamento) sessions.delete(id);
   }
 }, SWEEP_INTERVAL_MS);
 function paginaMobile(sessionId) {
@@ -156,7 +172,7 @@ function paginaMobile(sessionId) {
   .btn-concluir:disabled { opacity: 0.35; }
   .erro-camera { color: #fff; text-align: center; padding: 24px; font-size: 0.85rem; }
 
-    /* --- Revisão: escolher quais fotos capturadas vão ser enviadas ---
+  /* --- Revisão: escolher quais fotos capturadas vão ser enviadas ---
      position:fixed + inset:0 (em vez de min-height:100vh) porque no mobile
      100vh costuma incluir a área da barra de endereço do navegador; com
      overflow:hidden no body, isso empurrava o botão "Enviar Fotos" pra fora
@@ -173,6 +189,11 @@ function paginaMobile(sessionId) {
   .review-item.removida button { background: #FFFFFF; color: #1A1A1A; border: 1px solid #1A1A1A; }
   .review-actions { display: flex; gap: 10px; padding-top: 16px; }
   .review-actions .btn { flex: 1; padding: 16px; }
+
+  /* --- Conclusão: mostrada depois do envio (o link fecha nesse momento,
+     não dá mais pra reabrir nem mandar mais fotos por ele) --- */
+  #telaConcluido { display: none; position: fixed; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+  #telaConcluido svg { width: 52px; height: 52px; color: #1A7A3A; margin-bottom: 16px; }
 </style>
 </head>
 <body>
@@ -218,13 +239,32 @@ function paginaMobile(sessionId) {
       <button class="btn" id="btnEnviarTodas" type="button">Enviar Fotos</button>
     </div>
   </div>
+
+  <div id="telaConcluido">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 6 9 17l-5-5"/></svg>
+    <h1>Enviado!</h1>
+    <p>Já apareceu no computador. Pode fechar esta aba.</p>
+  </div>
 <script>
   const SESSION = ${JSON.stringify(sessionId)};
   const statusEl = document.getElementById('status');
-  const contadorEl = document.getElementById('contador');
-  let totalEnviadas = 0;
+  const telaInicial = document.getElementById('telaInicial');
+  const telaConcluido = document.getElementById('telaConcluido');
 
-  // --- Envio (compartilhado pelas duas origens: câmera e galeria) ---
+  // Tenta entrar em tela cheia (esconde a barra do navegador) — só funciona
+  // a partir de um toque do usuário, e o iOS Safari nem suporta isso pra
+  // página inteira; falha silenciosa nesses casos, sem quebrar nada.
+  function tentarTelaCheia() {
+    const el = document.documentElement;
+    const pedir = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    if (!pedir) return;
+    try { pedir.call(el)?.catch?.(() => {}); } catch (e) {}
+  }
+
+  // --- Envio (compartilhado pelas duas origens: câmera e galeria). Link de
+  // uso único: após o primeiro envio aceito, o servidor fecha a sessão —
+  // por isso aqui sempre navega pra tela de conclusão em vez de voltar
+  // pro início como se desse pra mandar mais fotos pelo mesmo link. ---
   function lerComoBase64(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -233,7 +273,6 @@ function paginaMobile(sessionId) {
       reader.readAsDataURL(file);
     });
   }
-
   async function enviarArquivos(files) {
     if (!files || !files.length) return;
     statusEl.textContent = 'Enviando ' + files.length + ' foto(s)...';
@@ -249,10 +288,11 @@ function paginaMobile(sessionId) {
         body: JSON.stringify({ files: payload })
       });
       if (!res.ok) throw new Error('falhou');
-      totalEnviadas += files.length;
-      statusEl.textContent = 'Enviado! Já apareceu no computador.';
-      statusEl.className = 'status ok';
-      contadorEl.textContent = totalEnviadas + ' foto(s) enviada(s) nesta sessão';
+      if (typeof pararCamera === 'function') pararCamera();
+      telaInicial.style.display = 'none';
+      telaCamera.style.display = 'none';
+      telaRevisao.style.display = 'none';
+      telaConcluido.style.display = 'flex';
     } catch (e) {
       statusEl.textContent = 'Link expirado ou sem conexão. Gere um novo QR no computador.';
       statusEl.className = 'status erro';
@@ -263,8 +303,8 @@ function paginaMobile(sessionId) {
     enviarArquivos(Array.from(e.target.files));
     e.target.value = '';
   });
+
   // --- Câmera ao vivo: tira quantas fotos quiser antes de enviar ---
-  const telaInicial = document.getElementById('telaInicial');
   const telaCamera = document.getElementById('telaCamera');
   const telaRevisao = document.getElementById('telaRevisao');
   const video = document.getElementById('video');
@@ -278,8 +318,8 @@ function paginaMobile(sessionId) {
   let stream = null;
   let imageCapture = null;
   let capturadas = []; // { dataUrl, blobUrl }
-
   async function abrirCamera() {
+    tentarTelaCheia();
     telaInicial.style.display = 'none';
     telaCamera.style.display = 'flex';
     erroCamera.style.display = 'none';
@@ -411,8 +451,6 @@ function paginaMobile(sessionId) {
       for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
       return new File([bytes], 'foto-camera-' + Date.now() + '-' + i + '.jpg', { type: 'image/jpeg' });
     });
-    telaRevisao.style.display = 'none';
-    telaInicial.style.display = 'flex';
     capturadas = [];
     await enviarArquivos(files);
   });
@@ -755,6 +793,12 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && parts[0] === 's' && parts.length === 2) {
     const id = parts[1];
     if (!SESSION_ID_RE.test(id)) { res.writeHead(400); res.end('id inválido'); return; }
+    const existente = sessions.get(id);
+    if (existente && sessionExpirada(existente)) {
+      res.writeHead(410, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(paginaExpirada());
+      return;
+    }
     const s = getOrCreateSession(id);
     s.lastTouch = Date.now();
     s.phoneLastActivity = Date.now();
@@ -763,10 +807,16 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // POST /api/upload/:id -> celular envia fotos
+  // POST /api/upload/:id -> celular envia fotos (link de uso único: a
+  // sessão fecha assim que esse envio é aceito, ver sessionExpirada)
   if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'upload' && parts.length === 3) {
     const id = parts[2];
     if (!SESSION_ID_RE.test(id)) { jsonResponse(res, 400, { erro: 'id inválido' }); return; }
+    const existente = sessions.get(id);
+    if (existente && sessionExpirada(existente)) {
+      jsonResponse(res, 410, { erro: 'sessão encerrada — gere um novo QR no computador' });
+      return;
+    }
     let size = 0; const chunks = [];
     req.on('data', (chunk) => {
       size += chunk.length;
@@ -781,6 +831,8 @@ const server = http.createServer((req, res) => {
         s.lastTouch = Date.now();
         s.phoneLastActivity = Date.now();
         s.queue.push(...files);
+        s.closed = true;
+        s.usedAt = Date.now();
         jsonResponse(res, 200, { ok: true, recebidas: files.length });
       } catch (e) {
         jsonResponse(res, 400, { erro: 'corpo inválido' });
