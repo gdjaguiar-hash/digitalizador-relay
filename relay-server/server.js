@@ -97,7 +97,6 @@ function paginaMobile(sessionId) {
 </style>
 </head>
 <body>
-<body>
 
   <div id="telaInicial">
     <h1>Digitalizador</h1>
